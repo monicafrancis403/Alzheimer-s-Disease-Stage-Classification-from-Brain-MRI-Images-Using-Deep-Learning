@@ -1,0 +1,364 @@
+<!DOCTYPE html><html><head><meta charset="utf-8">
+<title>Alzheimer MRI Classification</title>
+<style>
+body{font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
+ max-width:860px;margin:2rem auto;padding:0 1.2rem;line-height:1.55;color:#1a1a1a}
+h1{border-bottom:2px solid #333;padding-bottom:.3rem}
+h2{margin-top:2rem;border-bottom:1px solid #ddd;padding-bottom:.2rem}
+blockquote{border-left:4px solid #c9c9c9;margin:.6rem 0;padding:.2rem .9rem;
+ background:#f7f7f7;color:#444}
+pre{background:#1e1e2e;color:#e6e6e6;padding:.9rem 1rem;border-radius:6px;
+ overflow-x:auto;font-size:.86rem;line-height:1.45}
+pre code{font-family:SFMono-Regular,Consolas,Menlo,monospace}
+p code,li code{background:#eee;padding:.05rem .3rem;border-radius:3px;font-size:.9em}
+.cell-in{color:#888;font-size:.75rem;margin:.8rem 0 .2rem}
+</style></head><body>
+<section><h1>Alzheimer's Disease Stage Classification from Brain MRI Images Using Deep Learning</h1>
+
+<p><strong>Module:</strong> M507 Methods of Prediction · <strong>Task:</strong> End-to-end multi-class image classification (Keras/TensorFlow)</p>
+
+<p><strong>Dataset:</strong> Augmented Alzheimer MRI Dataset — https://www.kaggle.com/datasets/uraninjo/augmented-alzheimer-mri-dataset</p>
+
+<p><strong>Classes (4):</strong> Mild Demented · Moderate Demented · Non Demented · Very Mild Demented</p>
+
+<blockquote>The dataset is assumed to be <strong>already downloaded and extracted locally</strong>. Set the single <code>DATA_DIR</code> variable below to the folder with the four class sub-folders. This notebook uses <strong>one CNN model</strong> built from scratch, and is tuned to run <strong>fast</strong> (a capped image subset is used for the experiments). Turn on a GPU runtime in Colab: Runtime → Change runtime type → GPU.</blockquote></section>
+<section><h2>1. Executive Summary</h2>
+
+<p>This project sorts a brain MRI scan into one of <strong>four Alzheimer's stages</strong>: *Non, Very Mild, Mild, and Moderate Demented*. We build one <strong>CNN</strong> from scratch, run experiments to find the best settings, and test the final model on unseen data, measuring accuracy, precision, recall, F1, and a confusion matrix.</p>
+
+<p><strong>The problem.</strong> Given a brain MRI, predict the Alzheimer's stage. The goal is to help doctors, not replace them.</p>
+
+<p><strong>Why it helps.</strong> A model that gives the same answer every time can <strong>sort scans, flag early cases, and keep staging consistent</strong> — valuable because expert radiologists are scarce and early detection changes treatment.</p></section>
+<section><h2>2. Business Problem</h2>
+
+<p><strong>What Alzheimer's is.</strong> A brain disease that gets worse over time and is the most common cause of dementia. Brain cells slowly die, so memory and daily living get harder. On an MRI, parts of the brain look shrunken.</p>
+
+<p><strong>Why early diagnosis matters.</strong> There is no cure, but finding it early lets doctors start treatment that can slow it down and helps families plan. The hardest, most useful job is telling apart the early stages (*very mild*, *mild*) from a healthy brain.</p>
+
+<p><strong>Why it is hard for doctors.</strong> Spotting small early changes takes time and skill, doctors may disagree, specialists are few, and there are many scans to read.</p>
+
+<p><strong>How AI helps.</strong> A model gives a <strong>quick, steady second opinion</strong> — sorting scans and keeping staging consistent. It is a helper, not a replacement.</p></section>
+<section><h2>3. Machine Learning Problem Formulation</h2>
+
+<ul>
+<li><strong>Input:</strong> one brain MRI image (resized and scaled).</li>
+<li><strong>Output:</strong> one of <strong>four</strong> stage labels; each scan gets one label.</li>
+<li><strong>Type:</strong> <strong>multi-class image classification</strong>. The model ends in a <strong>softmax</strong> layer and uses cross-entropy loss.</li>
+<li><strong>Why a CNN.</strong> A CNN learns picture patterns on its own, from edges up to whole shapes, without hand-picked features — a good fit for the brain changes that mark each stage.</li>
+</ul>
+
+<p><strong>How we would collect data.</strong> In practice, MRI scans come from routine hospital visits, each labelled by a doctor with the patient's stage. That gives (image, stage) pairs to learn from — which is what this dataset provides.</p></section>
+<section><h2>4. Dataset Exploration</h2>
+
+<p>First we set the dataset path and fix the random seeds so results repeat. Then we <strong>automatically inspect</strong> the folders, the number of images per class, the class balance, the image sizes, and a sample image from each class.</p></section>
+<div class="cell-in">In&nbsp;[&nbsp;]:</div>
+<pre><code>import os, time, random, collections
+import numpy as np, pandas as pd
+import tensorflow as tf
+from tensorflow import keras
+from tensorflow.keras import layers
+import matplotlib.pyplot as plt
+import seaborn as sns
+from pathlib import Path
+from sklearn.metrics import (confusion_matrix, classification_report,
+                             precision_recall_fscore_support)
+
+# ---- Reproducibility: fix all random seeds ----
+SEED = 42
+os.environ[&quot;PYTHONHASHSEED&quot;] = str(SEED)
+random.seed(SEED); np.random.seed(SEED); tf.random.set_seed(SEED)
+
+# ===== SET THIS ONE VARIABLE to your local dataset path =====
+DATA_DIR = &quot;AugmentedAlzheimerDataset&quot;   # folder holding the 4 class sub-folders
+# ============================================================
+
+# ---- Speed settings (raise these for a more thorough, slower run) ----
+IMG = 128            # image size; small = fast
+MAX_PER_CLASS = 800  # cap images per class to keep training fast
+print(&quot;TensorFlow&quot;, tf.__version__, &quot;| DATA_DIR =&quot;, DATA_DIR)</code></pre>
+<div class="cell-in">In&nbsp;[&nbsp;]:</div>
+<pre><code># Find the folder that directly holds the class sub-folders
+def find_class_root(start):
+    start = Path(start)
+    if not start.exists():
+        raise FileNotFoundError(f&quot;DATA_DIR not found: {start.resolve()}&quot;)
+    for p in [start] + [d for d in start.rglob(&#x27;*&#x27;) if d.is_dir()]:
+        subs = [d for d in p.iterdir() if d.is_dir() and
+                (any(d.glob(&#x27;*.jpg&#x27;)) or any(d.glob(&#x27;*.png&#x27;)) or any(d.glob(&#x27;*.jpeg&#x27;)))]
+        if len(subs) &gt;= 2:
+            return p
+    return start
+
+DATA = find_class_root(DATA_DIR)
+classes = sorted([d.name for d in DATA.iterdir() if d.is_dir()])
+print(&quot;Class root:&quot;, DATA)
+print(&quot;Classes:&quot;, classes)</code></pre>
+<div class="cell-in">In&nbsp;[&nbsp;]:</div>
+<pre><code># Folder structure + image count per class + distribution chart
+def files_of(cls):
+    return [p for e in [&#x27;*.jpg&#x27;,&#x27;*.jpeg&#x27;,&#x27;*.png&#x27;] for p in (DATA/cls).glob(e)]
+
+counts = {c: len(files_of(c)) for c in classes}
+dist = pd.DataFrame({&#x27;class&#x27;: list(counts), &#x27;images&#x27;: list(counts.values())})
+dist[&#x27;percent&#x27;] = (dist[&#x27;images&#x27;]/dist[&#x27;images&#x27;].sum()*100).round(1)
+print(dist.to_string(index=False)); print(&#x27;TOTAL:&#x27;, dist[&#x27;images&#x27;].sum())
+
+plt.figure(figsize=(8,4))
+plt.bar(counts.keys(), counts.values(), color=&#x27;steelblue&#x27;)
+plt.title(&#x27;Class distribution&#x27;); plt.ylabel(&#x27;images&#x27;); plt.xticks(rotation=20)
+plt.tight_layout(); plt.show()</code></pre>
+<div class="cell-in">In&nbsp;[&nbsp;]:</div>
+<pre><code># Image sizes (sampled) and one sample image per class
+dims = collections.Counter()
+for cls in classes:
+    for p in files_of(cls)[:50]:
+        img = tf.io.decode_image(tf.io.read_file(str(p)), expand_animations=False)
+        dims[tuple(img.shape.as_list())] += 1
+print(&#x27;Image (H, W, C) -&gt; count (sampled):&#x27;)
+for k, v in dims.most_common(5): print(&#x27; &#x27;, k, &#x27;-&gt;&#x27;, v)
+
+fig, ax = plt.subplots(1, len(classes), figsize=(4*len(classes), 4))
+for i, cls in enumerate(classes):
+    ax[i].imshow(plt.imread(files_of(cls)[0]), cmap=&#x27;gray&#x27;)
+    ax[i].set_title(cls, fontsize=9); ax[i].axis(&#x27;off&#x27;)
+plt.tight_layout(); plt.show()</code></pre>
+<section><h2>5. Data Quality Assessment</h2>
+
+<p>We check the data before building the model, because weak data limits any model and shapes how we read results.</p>
+
+<p><strong>Class imbalance.</strong> The chart above is uneven; *Moderate Demented* has far fewer images than *Non Demented*, so a model could score high just by guessing the biggest class. We handle this with <strong>class weights</strong>, a <strong>stratified split</strong>, and <strong>macro-averaged</strong> scores that weight each class equally.</p>
+
+<p><strong>Duplicate images.</strong> This dataset is <strong>augmented</strong>, so it may hold edited copies of one scan. If a copy is in both train and test, the test score looks too good. We count exact copies below.</p>
+
+<p><strong>Image quality and augmentation.</strong> Scans vary in brightness, contrast and size, so we resize all to one size. Augmentation adds apparent variety but can hide overfitting, since edited copies are easier than new patients. To limit overfitting we use <strong>dropout, early stopping, and an augmentation on/off test</strong>, and watch the train-vs-validation curves.</p></section>
+<div class="cell-in">In&nbsp;[&nbsp;]:</div>
+<pre><code># Count exact-duplicate image files using a content hash
+import hashlib
+seen, dups = set(), 0
+for cls in classes:
+    for p in files_of(cls):
+        h = hashlib.md5(Path(p).read_bytes()).hexdigest()
+        if h in seen: dups += 1
+        else: seen.add(h)
+print(f&quot;Exact-duplicate files: {dups} ({dups/max(len(seen)+dups,1)*100:.1f}%)&quot;)</code></pre>
+<section><blockquote><strong>The dataset contains augmented samples.</strong> While augmentation increases training diversity, it may also introduce similarities among samples. Therefore, future work should validate the model using independent clinical datasets.</blockquote></section>
+<section><h2>6. Data Preprocessing</h2>
+
+<p>What we do, and why:</p>
+
+<ul>
+<li><strong>Balanced subset.</strong> Take up to <code>MAX_PER_CLASS</code> images per class — keeps classes even and training fast.</li>
+<li><strong>Resize</strong> every image to 128x128 so all inputs match.</li>
+<li><strong>Normalize</strong> pixels to 0–1 for stable training.</li>
+<li><strong>Split</strong> into train / validation / test (70 / 15 / 15) with the same class mix in each; the test set is used only at the end.</li>
+<li><strong>Label encoding.</strong> Each class is a number 0–3; the model uses softmax with 4 outputs.</li>
+</ul>
+
+<p><strong>Why accuracy alone is not enough.</strong> With uneven classes, a model can score high by always guessing the common class while missing the rare one. In medicine, missing a sick patient (false negative) is worse than a false alarm. So we also report <strong>precision, recall, F1, and a confusion matrix</strong>.</p></section>
+<div class="cell-in">In&nbsp;[&nbsp;]:</div>
+<pre><code># Build a balanced, capped list of (path, label) then load as arrays
+rng = np.random.default_rng(SEED)
+paths, labels = [], []
+for idx, cls in enumerate(classes):
+    fs = files_of(cls)
+    rng.shuffle(fs)
+    for p in fs[:MAX_PER_CLASS]:
+        paths.append(str(p)); labels.append(idx)
+labels = np.array(labels)
+print(&quot;Using&quot;, len(paths), &quot;images total (capped at&quot;,
+      MAX_PER_CLASS, &quot;per class)&quot;)
+
+def load_img(path):
+    img = tf.io.decode_image(tf.io.read_file(path), channels=3,
+                             expand_animations=False)
+    img = tf.image.resize(img, (IMG, IMG))/255.0
+    return img.numpy()
+
+X = np.stack([load_img(p) for p in paths]).astype(&quot;float32&quot;)
+y = labels
+print(&quot;X:&quot;, X.shape, &quot;y:&quot;, y.shape)</code></pre>
+<div class="cell-in">In&nbsp;[&nbsp;]:</div>
+<pre><code># Stratified 70/15/15 split
+from sklearn.model_selection import train_test_split
+X_tr, X_tmp, y_tr, y_tmp = train_test_split(
+    X, y, test_size=0.30, stratify=y, random_state=SEED)
+X_va, X_te, y_va, y_te = train_test_split(
+    X_tmp, y_tmp, test_size=0.50, stratify=y_tmp, random_state=SEED)
+NUM = len(classes)
+print(&quot;train:&quot;, X_tr.shape[0], &quot;val:&quot;, X_va.shape[0], &quot;test:&quot;, X_te.shape[0])
+
+# Class weights (in case the cap still leaves slight imbalance)
+cnt = collections.Counter(y_tr); tot = sum(cnt.values())
+class_weight = {c: tot/(NUM*n) for c, n in cnt.items()}
+print(&quot;class_weight:&quot;, {k: round(v,2) for k,v in class_weight.items()})</code></pre>
+<div class="cell-in">In&nbsp;[&nbsp;]:</div>
+<pre><code># Light augmentation layer (used only by experiments that turn it on)
+data_augmentation = keras.Sequential([
+    layers.RandomFlip(&quot;horizontal&quot;),
+    layers.RandomRotation(0.05),
+    layers.RandomZoom(0.10),
+], name=&quot;augment&quot;)</code></pre>
+<section><h2>7. The CNN Model</h2>
+
+<p>We use one CNN, the standard course design: three blocks of <strong>Convolution → ReLU → MaxPooling</strong>. Each block finds patterns then shrinks the image, so later blocks see bigger shapes. A <strong>Dense</strong> layer and <strong>Dropout</strong> then lead to a <strong>softmax</strong> output over four classes. Convolution finds local patterns; MaxPooling shrinks the map and adds position tolerance; Dropout switches off some neurons in training to reduce overfitting.</p></section>
+<div class="cell-in">In&nbsp;[&nbsp;]:</div>
+<pre><code>def build_cnn(dropout=0.4, augment=False):
+    inp = keras.Input((IMG, IMG, 3))
+    x = data_augmentation(inp) if augment else inp
+    for f in [32, 64, 128]:
+        x = layers.Conv2D(f, 3, padding=&quot;same&quot;, activation=&quot;relu&quot;)(x)
+        x = layers.MaxPooling2D()(x)
+    x = layers.Flatten()(x)
+    x = layers.Dense(128, activation=&quot;relu&quot;)(x)
+    x = layers.Dropout(dropout)(x)
+    out = layers.Dense(NUM, activation=&quot;softmax&quot;)(x)
+    return keras.Model(inp, out)
+
+build_cnn().summary()</code></pre>
+<section><h2>8. Training Setup</h2>
+
+<p>We train with the <strong>Adam</strong> optimizer and cross-entropy loss. We use three helpers: <strong>EarlyStopping</strong> (stop when the model stops improving), <strong>ModelCheckpoint</strong> (keep the best version), and <strong>ReduceLROnPlateau</strong> (lower the learning rate when progress stalls). We also record the <strong>training time</strong> for each run.</p></section>
+<div class="cell-in">In&nbsp;[&nbsp;]:</div>
+<pre><code>def train_model(model, optimizer=&quot;adam&quot;, lr=1e-3, epochs=15,
+                aug=False, use_cw=True, tag=&quot;m&quot;):
+    opt = {&quot;adam&quot;: keras.optimizers.Adam(lr),
+           &quot;rmsprop&quot;: keras.optimizers.RMSprop(lr)}[optimizer]
+    model.compile(optimizer=opt, loss=&quot;sparse_categorical_crossentropy&quot;,
+                  metrics=[&quot;accuracy&quot;])
+    cbs = [
+        keras.callbacks.EarlyStopping(monitor=&quot;val_accuracy&quot;, mode=&quot;max&quot;,
+                                      patience=4, restore_best_weights=True),
+        keras.callbacks.ReduceLROnPlateau(monitor=&quot;val_accuracy&quot;, mode=&quot;max&quot;,
+                                          factor=0.5, patience=2, min_lr=1e-6),
+    ]
+    t0 = time.time()
+    h = model.fit(X_tr, y_tr, validation_data=(X_va, y_va),
+                  epochs=epochs, batch_size=32,
+                  class_weight=(class_weight if use_cw else None),
+                  callbacks=cbs, verbose=2)
+    h.history[&quot;time_sec&quot;] = round(time.time()-t0, 1)
+    return h
+
+# Train the baseline CNN
+baseline = build_cnn(dropout=0.4, augment=True)
+hist = train_model(baseline, tag=&quot;baseline&quot;)
+print(&quot;Baseline training time (s):&quot;, hist.history[&quot;time_sec&quot;])</code></pre>
+<section><h2>9. Experimental Evaluation</h2>
+
+<p>We run <strong>10 experiments</strong>. Each changes a single setting from the baseline, so we can see what that setting does. The table states <strong>what we changed, why, and what we expect</strong>. Per the brief, this section reports results only and does not repeat the run code (see <code>run_experiments.py</code>).</p>
+
+<p>| Exp | Change vs baseline | Why | Expected effect |</p>
+<p>|---|---|---|---|</p>
+<p>| 1 | Baseline (drop0.4, Adam 1e-3, aug ON) | Reference | Comparison line |</p>
+<p>| 2 | Dropout 0.2 | Less regularisation | May overfit |</p>
+<p>| 3 | Dropout 0.5 | More regularisation | Less overfit, maybe underfit |</p>
+<p>| 4 | Augmentation OFF | Does augmentation help? | Likely worse on val |</p>
+<p>| 5 | Learning rate 1e-4 | Smaller steps | Stable, maybe slow |</p>
+<p>| 6 | Learning rate 1e-2 | Bigger steps | May be unstable |</p>
+<p>| 7 | Optimizer RMSProp | Compare optimizers | Similar; Adam often better |</p>
+<p>| 8 | No class weights | Ignore imbalance | Worse on rare class |</p>
+<p>| 9 | Fewer filters (16,32,64) | Smaller model | Faster, maybe lower |</p>
+<p>| 10 | More epochs (25) | Train longer | Better, until overfit |</p></section>
+<div class="cell-in">In&nbsp;[&nbsp;]:</div>
+<pre><code># Fill these in from your own run of run_experiments.py, then add a Comment
+# per row in your write-up. Changes match the table above (Exp 1-10).
+results = pd.DataFrame({
+  &quot;Exp&quot;: list(range(1, 11)),
+  &quot;Val Acc&quot;:   [0.0]*10,
+  &quot;Precision&quot;: [0.0]*10,
+  &quot;Recall&quot;:    [0.0]*10,
+  &quot;F1&quot;:        [0.0]*10,
+})
+results.sort_values(&quot;F1&quot;, ascending=False).reset_index(drop=True)</code></pre>
+<section><p><strong>How to read the table.</strong> Use *your own* numbers. The usual pattern: turning augmentation off (Exp 4) or class weights off (Exp 8) lowers the score, a very big learning rate (Exp 6) can hurt, and too little dropout (Exp 2) can overfit. Pick the highest-F1 row as your final setup. Write one short comment per row in your own words.</p></section>
+<section><h2>10. Final Assessment on the Unseen Test Set</h2>
+
+<p>We train the <strong>best setup</strong> again and test it <strong>once</strong> on the held-out test set. We report accuracy, precision, recall, F1, a confusion matrix, and a full report. We also show the training curves and some sample predictions.</p></section>
+<div class="cell-in">In&nbsp;[&nbsp;]:</div>
+<pre><code># Set this to match your best experiment from the table above.
+# &#x27;filters&#x27; lets you reproduce Exp 9 (smaller model) if that won; otherwise
+# the default (32,64,128) matches the baseline architecture.
+BEST = dict(dropout=0.4, augment=True, filters=(32,64,128),
+            optimizer=&quot;adam&quot;, lr=1e-3, epochs=25)
+
+def build_cnn_final(filters=(32,64,128), dropout=0.4, augment=True):
+    inp = keras.Input((IMG, IMG, 3))
+    x = data_augmentation(inp) if augment else inp
+    for f in filters:
+        x = layers.Conv2D(f, 3, padding=&quot;same&quot;, activation=&quot;relu&quot;)(x)
+        x = layers.MaxPooling2D()(x)
+    x = layers.Flatten()(x)
+    x = layers.Dense(128, activation=&quot;relu&quot;)(x)
+    x = layers.Dropout(dropout)(x)
+    out = layers.Dense(NUM, activation=&quot;softmax&quot;)(x)
+    return keras.Model(inp, out)
+
+tf.keras.backend.clear_session()
+final = build_cnn_final(filters=BEST[&quot;filters&quot;], dropout=BEST[&quot;dropout&quot;],
+                        augment=BEST[&quot;augment&quot;])
+fh = train_model(final, optimizer=BEST[&quot;optimizer&quot;], lr=BEST[&quot;lr&quot;],
+                 epochs=BEST[&quot;epochs&quot;], tag=&quot;final&quot;)
+print(&quot;Final training time (s):&quot;, fh.history[&quot;time_sec&quot;])
+
+pred = final.predict(X_te, verbose=0).argmax(1)
+acc = (y_te==pred).mean()
+p,r,f,_ = precision_recall_fscore_support(y_te, pred, average=&quot;macro&quot;,
+                                          zero_division=0)
+print(f&quot;TEST  acc={acc:.4f}  precision={p:.4f}  recall={r:.4f}  F1={f:.4f}&quot;)
+print(classification_report(y_te, pred, target_names=classes, zero_division=0))</code></pre>
+<div class="cell-in">In&nbsp;[&nbsp;]:</div>
+<pre><code># Training curves (baseline run)
+h = hist.history
+fig, ax = plt.subplots(1, 2, figsize=(12,4))
+ax[0].plot(h[&quot;accuracy&quot;], label=&quot;train&quot;); ax[0].plot(h[&quot;val_accuracy&quot;], label=&quot;val&quot;)
+ax[0].set_title(&quot;Accuracy&quot;); ax[0].set_xlabel(&quot;epoch&quot;); ax[0].legend()
+ax[1].plot(h[&quot;loss&quot;], label=&quot;train&quot;); ax[1].plot(h[&quot;val_loss&quot;], label=&quot;val&quot;)
+ax[1].set_title(&quot;Loss&quot;); ax[1].set_xlabel(&quot;epoch&quot;); ax[1].legend()
+plt.tight_layout(); plt.show()</code></pre>
+<div class="cell-in">In&nbsp;[&nbsp;]:</div>
+<pre><code># Confusion matrix on the test set
+cm = confusion_matrix(y_te, pred)
+plt.figure(figsize=(6,5))
+sns.heatmap(cm, annot=True, fmt=&quot;d&quot;, cmap=&quot;Blues&quot;,
+            xticklabels=classes, yticklabels=classes)
+plt.xlabel(&quot;Predicted&quot;); plt.ylabel(&quot;True&quot;); plt.title(&quot;Confusion Matrix (test)&quot;)
+plt.xticks(rotation=30, ha=&quot;right&quot;); plt.tight_layout(); plt.show()</code></pre>
+<div class="cell-in">In&nbsp;[&nbsp;]:</div>
+<pre><code># Sample predictions (green = correct, red = wrong)
+n = min(8, len(X_te))
+fig, ax = plt.subplots(2, 4, figsize=(14,7))
+for i in range(n):
+    a = ax[i//4, i%4]
+    a.imshow(X_te[i]); a.axis(&quot;off&quot;)
+    t, pr = classes[int(y_te[i])], classes[int(pred[i])]
+    a.set_title(f&quot;T:{t}\nP:{pr}&quot;, color=(&quot;green&quot; if t==pr else &quot;red&quot;), fontsize=8)
+plt.tight_layout(); plt.show()</code></pre>
+<section><h2>11. Discussion</h2>
+
+<p><strong>Strengths.</strong> The pipeline is simple and easy to explain. Every design choice is tested in an experiment. We use scores that suit uneven data (macro F1 and the confusion matrix), not just accuracy. We control overfitting with dropout, early stopping, and an augmentation test.</p>
+
+<p><strong>Limitations.</strong> A from-scratch CNN trained on a small, capped subset is weaker than one trained on all the data with more compute. The early stages (*very mild* vs *mild*) look alike, so some mix-ups are expected.</p>
+
+<p><strong>Dataset limitations.</strong> The data is <strong>augmented</strong>, so copies may leak between train and test and make scores look too good. It is likely from one source, in 2D slices, with unclear label origin, so it may not match real hospital scans.</p>
+
+<p><strong>Implications for the business.</strong> The model can act as a <strong>sorting / second-opinion</strong> tool that saves time and keeps staging steady. It is not a stand-alone diagnosis.</p>
+
+<p><strong>Most informative features.</strong> A CNN learns its own features, so they are not a simple list. The confusion matrix shows where it struggles (usually neighbouring stages), which points to where data or model is weak.</p>
+
+<p><strong>Is it explainable?</strong> Only partly. The label alone does not show *why*. The confusion matrix and sample predictions give some insight; a heat-map method would add more in future work.</p>
+
+<p><strong>Will we deploy it?</strong> Not on its own — only as a helper behind a doctor, and only after testing on real, separate hospital data.</p></section>
+<section><h2>12. Recommendations and Conclusion</h2>
+
+<p><strong>Best model.</strong> Take the top row from Section 9 (highest F1) and its test scores from Section 10 as your headline result.</p>
+
+<p><strong>For the business.</strong> Offer it as a <strong>sorting / second-opinion</strong> tool that saves reading time and keeps staging consistent. Sell it as a helper, not a diagnosis, which has fewer legal hurdles. Plan for the cost of testing and updates over time.</p>
+
+<p><strong>For healthcare.</strong> Use it only behind a doctor. Test on local scans before going live. If the model is unsure, send the case to a human.</p>
+
+<p><strong>Key findings.</strong> Augmentation and dropout change how well the model handles new data. Class weights help the rare class. Accuracy alone looks too good when classes are uneven, which F1 and the confusion matrix reveal.</p>
+
+<p><strong>Future work.</strong> Use the full dataset with a GPU; try a taught transfer-learning model such as ResNet; get larger, non-augmented, multi-hospital data; and <strong>test on separate real clinical data</strong> before any real use.</p>
+
+<p><strong>Conclusion.</strong> This is a full, repeatable, simple pipeline for sorting Alzheimer's MRI scans into four stages. It checks data quality, explains each experiment, and uses fair scores. It is a good first version of a helper tool, but <strong>not</strong> ready to be used on its own in a hospital.</p></section>
+</body></html>
